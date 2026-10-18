@@ -159,3 +159,184 @@ export function calculateAuditSummary(
     topOverlaps: overlaps.slice(0, 5),
   };
 }
+
+/**
+ * Dynamically rebalances portfolio allocations when one fund's slider changes,
+ * ensuring the total allocation across all active funds always sums to exactly 100%.
+ */
+export function rebalanceAllocationsOnSliderChange(
+  currentAllocations: PortfolioAllocation[],
+  targetFundId: string,
+  newTargetWeight: number
+): PortfolioAllocation[] {
+  // Clamp between 0 and 100
+  const clampedTargetWeight = Math.max(0, Math.min(100, Math.round(newTargetWeight)));
+
+  // Identify all other active funds (funds that currently have weight > 0 and are not the target)
+  const otherActiveAllocations = currentAllocations.filter(
+    (a) => a.fundId !== targetFundId && a.weight > 0
+  );
+
+  // If there are no other active funds, this target fund takes 100% (or 0 if user drags to 0)
+  if (otherActiveAllocations.length === 0) {
+    return currentAllocations.map((a) =>
+      a.fundId === targetFundId ? { ...a, weight: clampedTargetWeight === 0 ? 0 : 100 } : a
+    );
+  }
+
+  // The remaining budget that all other active funds must share
+  const remainingBudget = 100 - clampedTargetWeight;
+
+  // Sum of existing weights of the other active funds
+  const currentOtherSum = otherActiveAllocations.reduce((sum, a) => sum + a.weight, 0);
+
+  // Scale each other active fund proportionally
+  let updated = currentAllocations.map((a) => {
+    if (a.fundId === targetFundId) {
+      return { ...a, weight: clampedTargetWeight };
+    }
+    if (a.weight <= 0) {
+      return a; // Inactive funds stay 0
+    }
+
+    if (remainingBudget <= 0) {
+      return { ...a, weight: 0 };
+    }
+
+    if (currentOtherSum > 0) {
+      const proportionalWeight = Math.round((a.weight / currentOtherSum) * remainingBudget);
+      return { ...a, weight: Math.max(0, proportionalWeight) };
+    } else {
+      const equalShare = Math.round(remainingBudget / otherActiveAllocations.length);
+      return { ...a, weight: Math.max(0, equalShare) };
+    }
+  });
+
+  // Ensure total sum is exactly 100 by adjusting for rounding discrepancies
+  if (clampedTargetWeight < 100) {
+    const currentTotal = updated.reduce((sum, a) => sum + a.weight, 0);
+    const discrepancy = 100 - currentTotal;
+
+    if (discrepancy !== 0) {
+      // Find the other active fund with the largest weight and absorb the rounding discrepancy
+      const largestOther = [...updated]
+        .filter((a) => a.fundId !== targetFundId && a.weight > 0)
+        .sort((a, b) => b.weight - a.weight)[0];
+
+      if (largestOther) {
+        updated = updated.map((a) =>
+          a.fundId === largestOther.fundId
+            ? { ...a, weight: Math.max(0, a.weight + discrepancy) }
+            : a
+        );
+      }
+    }
+  }
+
+  return updated;
+}
+
+/**
+ * Toggles a fund ON or OFF and rebalances the active funds to sum to exactly 100%.
+ */
+export function toggleFundWithRebalance(
+  currentAllocations: PortfolioAllocation[],
+  targetFundId: string
+): PortfolioAllocation[] {
+  const existing = currentAllocations.find((a) => a.fundId === targetFundId);
+  const isCurrentlyActive = existing && existing.weight > 0;
+
+  if (isCurrentlyActive) {
+    // Turning OFF: set target to 0, distribute its weight proportionally to remaining active funds
+    const remainingActive = currentAllocations.filter(
+      (a) => a.fundId !== targetFundId && a.weight > 0
+    );
+
+    if (remainingActive.length === 0) {
+      return currentAllocations.map((a) =>
+        a.fundId === targetFundId ? { ...a, weight: 0 } : a
+      );
+    }
+
+    const remainingSum = remainingActive.reduce((sum, a) => sum + a.weight, 0);
+
+    let updated = currentAllocations.map((a) => {
+      if (a.fundId === targetFundId) return { ...a, weight: 0 };
+      if (a.weight <= 0) return a;
+      const rebalancedWeight = Math.round((a.weight / remainingSum) * 100);
+      return { ...a, weight: rebalancedWeight };
+    });
+
+    // Fix rounding discrepancy
+    const total = updated.reduce((sum, a) => sum + a.weight, 0);
+    const diff = 100 - total;
+    if (diff !== 0) {
+      const first = updated.find((a) => a.fundId !== targetFundId && a.weight > 0);
+      if (first) {
+        updated = updated.map((a) =>
+          a.fundId === first.fundId ? { ...a, weight: Math.max(0, a.weight + diff) } : a
+        );
+      }
+    }
+    return updated;
+  } else {
+    // Turning ON: add target fund with a fair share (e.g. 25% or 100 / (N+1)), and scale down existing active funds
+    const activeAllocations = currentAllocations.filter((a) => a.weight > 0);
+
+    if (activeAllocations.length === 0) {
+      const exists = currentAllocations.some((a) => a.fundId === targetFundId);
+      if (exists) {
+        return currentAllocations.map((a) =>
+          a.fundId === targetFundId ? { ...a, weight: 100 } : a
+        );
+      }
+      return [...currentAllocations, { fundId: targetFundId, weight: 100 }];
+    }
+
+    const targetShare = Math.min(25, Math.round(100 / (activeAllocations.length + 1)));
+    const scaleFactor = (100 - targetShare) / 100;
+
+    let updated = currentAllocations.map((a) => {
+      if (a.fundId === targetFundId) return { ...a, weight: targetShare };
+      if (a.weight <= 0) return a;
+      return { ...a, weight: Math.round(a.weight * scaleFactor) };
+    });
+
+    if (!updated.some((a) => a.fundId === targetFundId)) {
+      updated.push({ fundId: targetFundId, weight: targetShare });
+    }
+
+    // Fix rounding discrepancy to guarantee exact 100%
+    const total = updated.reduce((sum, a) => sum + a.weight, 0);
+    const diff = 100 - total;
+    if (diff !== 0) {
+      const largest = [...updated]
+        .filter((a) => a.fundId !== targetFundId && a.weight > 0)
+        .sort((a, b) => b.weight - a.weight)[0];
+      if (largest) {
+        updated = updated.map((a) =>
+          a.fundId === largest.fundId ? { ...a, weight: Math.max(0, a.weight + diff) } : a
+        );
+      }
+    }
+    return updated;
+  }
+}
+
+/**
+ * Rebalances all active funds evenly to sum to 100%.
+ */
+export function rebalanceEvenly(currentAllocations: PortfolioAllocation[]): PortfolioAllocation[] {
+  const active = currentAllocations.filter((a) => a.weight > 0);
+  if (active.length === 0) return currentAllocations;
+
+  const equalWeight = Math.floor(100 / active.length);
+  let remainder = 100 - equalWeight * active.length;
+
+  return currentAllocations.map((a) => {
+    if (a.weight <= 0) return a;
+    const addOne = remainder > 0 ? 1 : 0;
+    if (remainder > 0) remainder--;
+    return { ...a, weight: equalWeight + addOne };
+  });
+}

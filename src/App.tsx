@@ -8,7 +8,13 @@ import {
 } from '@mui/material';
 import { SEED_FUNDS, PORTFOLIO_PRESETS } from './data/seedFunds';
 import { Fund, PortfolioAllocation, PortfolioPreset, ChatMessage } from './types';
-import { calculateGrowthTrajectory, calculateAuditSummary } from './services/portfolioMath';
+import {
+  calculateGrowthTrajectory,
+  calculateAuditSummary,
+  rebalanceAllocationsOnSliderChange,
+  toggleFundWithRebalance,
+  rebalanceEvenly,
+} from './services/portfolioMath';
 import { getInitialGreetingMessage, processUserQuery } from './services/aiCopilot';
 import { TopNavigation } from './components/layout/TopNavigation';
 import { FooterDisclaimer } from './components/layout/FooterDisclaimer';
@@ -70,40 +76,42 @@ export const App: React.FC = () => {
     return calculateGrowthTrajectory(principal, annualReturn, auditSummary.weightedExpenseRatio, horizon);
   }, [principal, annualReturn, auditSummary.weightedExpenseRatio, horizon]);
 
-  // Handlers
+  // Handlers with Auto-Rebalance to 100%
   const handleSelectPreset = (preset: PortfolioPreset) => {
     setActivePresetId(preset.id);
     setAllocations(preset.allocations);
   };
 
+  // Used by the SLIDER — auto-proportionally rebalances other funds
   const handleUpdateAllocation = (fundId: string, weight: number) => {
-    setActivePresetId(null); // Custom allocation mode
+    setActivePresetId(null);
+    setAllocations((prev) => rebalanceAllocationsOnSliderChange(prev, fundId, weight));
+  };
+
+  // Used by the POPOVER confirm — sets exact, pre-validated values directly (total always == 100)
+  const handleSetExactAllocation = (fundId: string, weight: number) => {
+    setActivePresetId(null);
     setAllocations((prev) => {
       const exists = prev.find((a) => a.fundId === fundId);
-      if (exists) {
-        return prev.map((a) => (a.fundId === fundId ? { ...a, weight } : a));
-      }
+      if (exists) return prev.map((a) => a.fundId === fundId ? { ...a, weight } : a);
       return [...prev, { fundId, weight }];
     });
   };
 
   const handleToggleFund = (fundId: string) => {
     setActivePresetId(null);
-    setAllocations((prev) => {
-      const existing = prev.find((a) => a.fundId === fundId);
-      if (existing && existing.weight > 0) {
-        return prev.map((a) => (a.fundId === fundId ? { ...a, weight: 0 } : a));
-      } else if (existing) {
-        return prev.map((a) => (a.fundId === fundId ? { ...a, weight: 25 } : a));
-      }
-      return [...prev, { fundId, weight: 25 }];
-    });
+    setAllocations((prev) => toggleFundWithRebalance(prev, fundId));
+  };
+
+  const handleRebalanceEvenly = () => {
+    setActivePresetId(null);
+    setAllocations((prev) => rebalanceEvenly(prev));
   };
 
   const handleAddCustomFund = (newFund: Fund) => {
     setFunds((prev) => [newFund, ...prev]);
     setActivePresetId(null);
-    setAllocations((prev) => [{ fundId: newFund.id, weight: 20 }, ...prev]);
+    setAllocations((prev) => toggleFundWithRebalance(prev, newFund.id));
   };
 
   const handleSendMessage = (query: string) => {
@@ -161,6 +169,7 @@ export const App: React.FC = () => {
                 onSelectPreset={handleSelectPreset}
                 onUpdateAllocation={handleUpdateAllocation}
                 onToggleFund={handleToggleFund}
+                onRebalanceEvenly={handleRebalanceEvenly}
                 onOpenCustomDialog={() => setCustomDialogOpen(true)}
                 onUpdatePrincipal={setPrincipal}
                 onUpdateReturn={setAnnualReturn}

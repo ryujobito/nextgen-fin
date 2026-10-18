@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Card,
   CardContent,
@@ -11,7 +11,13 @@ import {
   ButtonGroup,
   Divider,
   Stack,
-  Tooltip,
+  Popover,
+  TextField,
+  MenuItem,
+  FormControl,
+  InputLabel,
+  Select,
+  Alert,
 } from '@mui/material';
 import {
   ResponsiveContainer,
@@ -32,6 +38,9 @@ import {
   Calendar,
   DollarSign,
   Layers,
+  Lock,
+  CheckCircle2,
+  RefreshCw,
 } from 'lucide-react';
 import { Fund, PortfolioAllocation, PortfolioPreset, YearlyDataPoint, PortfolioAuditSummary } from '../../types';
 
@@ -47,7 +56,9 @@ interface WealthChartContainerProps {
   auditSummary: PortfolioAuditSummary;
   onSelectPreset: (preset: PortfolioPreset) => void;
   onUpdateAllocation: (fundId: string, weight: number) => void;
+  onSetExactAllocation?: (fundId: string, weight: number) => void;
   onToggleFund: (fundId: string) => void;
+  onRebalanceEvenly?: () => void;
   onOpenCustomDialog: () => void;
   onUpdatePrincipal: (val: number) => void;
   onUpdateReturn: (val: number) => void;
@@ -66,13 +77,85 @@ export const WealthChartContainer: React.FC<WealthChartContainerProps> = ({
   auditSummary,
   onSelectPreset,
   onUpdateAllocation,
+  onSetExactAllocation,
   onToggleFund,
+  onRebalanceEvenly,
   onOpenCustomDialog,
   onUpdatePrincipal,
   onUpdateReturn,
   onUpdateHorizon,
 }) => {
-  // Format currency helpers
+  // ─── Inline Allocation Popover State ───────────────────────────────────────
+  const [popoverAnchor, setPopoverAnchor] = useState<HTMLElement | null>(null);
+  const [pendingFundId, setPendingFundId] = useState<string | null>(null);
+  const [pendingAmount, setPendingAmount] = useState<string>('');
+  const [sourceFundId, setSourceFundId] = useState<string>('');
+
+  // Active funds the user can take % from (all active funds excluding the pending one)
+  const activeFunds = allocations.filter((a) => a.weight > 0);
+
+  // Total if we confirm: active funds minus deducted % plus new allocation must equal 100
+  const pendingAmountNum = parseInt(pendingAmount, 10);
+  const isAmountValid = !isNaN(pendingAmountNum) && pendingAmountNum >= 1 && pendingAmountNum <= 99;
+  const sourceAlloc = allocations.find((a) => a.fundId === sourceFundId);
+  const sourceWeight = sourceAlloc?.weight ?? 0;
+  const newSourceWeight = sourceWeight - pendingAmountNum;
+
+  // Validation rules for the popover
+  const errorMessage = (() => {
+    if (pendingAmount === '') return '';
+    if (!isAmountValid) return 'Enter a whole number between 1 and 99.';
+    if (!sourceFundId) return 'Select which fund to take from.';
+    if (newSourceWeight < 0) return `Not enough — ${sourceFundId} only has ${sourceWeight}% to give.`;
+    if (newSourceWeight === 0 && activeFunds.length === 1) return 'Cannot reduce only active fund to 0%.';
+    return '';
+  })();
+
+  const canConfirm = isAmountValid && sourceFundId !== '' && errorMessage === '';
+
+  // Derived info for display
+  const pendingFund = funds.find((f) => f.id === pendingFundId);
+
+  const handleChipClick = (fund: typeof funds[0], event: React.MouseEvent<HTMLElement>) => {
+    const alloc = allocations.find((a) => a.fundId === fund.id);
+    const isActive = (alloc?.weight ?? 0) > 0;
+
+    if (isActive) {
+      // Already active — just toggle off normally via parent handler
+      onToggleFund(fund.id);
+    } else {
+      // Inactive — show the allocation popover
+      setPendingFundId(fund.id);
+      setPendingAmount('');
+      setSourceFundId(activeFunds.length === 1 ? activeFunds[0].fundId : '');
+      setPopoverAnchor(event.currentTarget);
+    }
+  };
+
+  const handlePopoverConfirm = () => {
+    if (!pendingFundId || !canConfirm) return;
+
+    const setAlloc = onSetExactAllocation ?? onUpdateAllocation;
+
+    // 1. Deduct from the source fund
+    setAlloc(sourceFundId, newSourceWeight);
+    // 2. Set the new fund's exact allocation
+    setAlloc(pendingFundId, pendingAmountNum);
+
+    setPopoverAnchor(null);
+    setPendingFundId(null);
+    setPendingAmount('');
+    setSourceFundId('');
+  };
+
+  const handlePopoverClose = () => {
+    setPopoverAnchor(null);
+    setPendingFundId(null);
+    setPendingAmount('');
+    setSourceFundId('');
+  };
+
+  // ─── Format currency helpers ───────────────────────────────────────────────
   const formatCompact = (val: number) => {
     if (val >= 1000000) return `$${(val / 1000000).toFixed(2)}M`;
     if (val >= 1000) return `$${(val / 1000).toFixed(0)}k`;
@@ -166,8 +249,8 @@ export const WealthChartContainer: React.FC<WealthChartContainerProps> = ({
                         label={fund.ticker}
                         size="small"
                         color={isActive ? 'primary' : 'default'}
-                        onClick={() => onToggleFund(fund.id)}
-                        sx={{ fontWeight: 'bold' }}
+                        onClick={(e) => handleChipClick(fund, e)}
+                        sx={{ fontWeight: 'bold', cursor: 'pointer' }}
                       />
                       <Typography variant="caption" color="text.secondary">
                         Fee: <strong>{feePct}%</strong>
@@ -183,7 +266,7 @@ export const WealthChartContainer: React.FC<WealthChartContainerProps> = ({
                         value={alloc?.weight || 0}
                         min={0}
                         max={100}
-                        step={5}
+                        step={1}
                         onChange={(_, val) => onUpdateAllocation(fund.id, val as number)}
                       />
                     )}
@@ -193,6 +276,100 @@ export const WealthChartContainer: React.FC<WealthChartContainerProps> = ({
             })}
           </Grid>
         </Box>
+
+        {/* ─── Inline Allocation Popover ─────────────────────────────────── */}
+        <Popover
+          open={Boolean(popoverAnchor)}
+          anchorEl={popoverAnchor}
+          onClose={handlePopoverClose}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+          transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+          PaperProps={{
+            sx: { p: 2.5, width: 320, borderRadius: 2, boxShadow: 6 },
+          }}
+        >
+          {/* Header */}
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1.5 }}>
+            <Typography variant="subtitle2" fontWeight="bold">
+              ➕ Add {pendingFund?.ticker ?? '—'} to Portfolio
+            </Typography>
+            <Button size="small" color="inherit" onClick={handlePopoverClose} sx={{ minWidth: 0, p: 0.5 }}>
+              ✕
+            </Button>
+          </Box>
+
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2, lineHeight: 1.4 }}>
+            Portfolio must total exactly <strong>100%</strong>. Enter how much to allocate to{' '}
+            <strong>{pendingFund?.name ?? '—'}</strong>, and choose which active fund gives up that %.
+          </Typography>
+
+          {/* Amount Input */}
+          <TextField
+            label={`Allocate to ${pendingFund?.ticker ?? '—'} (%)`}
+            placeholder="e.g. 20"
+            type="number"
+            size="small"
+            fullWidth
+            value={pendingAmount}
+            onChange={(e) => setPendingAmount(e.target.value)}
+            inputProps={{ min: 1, max: 99, step: 1 }}
+            sx={{ mb: 2 }}
+            error={Boolean(errorMessage)}
+          />
+
+          {/* Source Fund Selector */}
+          <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+            <InputLabel>Take % from which fund?</InputLabel>
+            <Select
+              value={sourceFundId}
+              label="Take % from which fund?"
+              onChange={(e) => setSourceFundId(e.target.value)}
+            >
+              {activeFunds.map((a) => {
+                const f = funds.find((x) => x.id === a.fundId);
+                return (
+                  <MenuItem key={a.fundId} value={a.fundId}>
+                    {f?.ticker ?? a.fundId} — currently {a.weight}%
+                    {isAmountValid && a.fundId === sourceFundId
+                      ? ` → would become ${Math.max(0, a.weight - pendingAmountNum)}%`
+                      : ''}
+                  </MenuItem>
+                );
+              })}
+            </Select>
+          </FormControl>
+
+          {/* Live Preview of resulting total */}
+          {isAmountValid && sourceFundId && !errorMessage && (
+            <Alert severity="success" sx={{ mb: 1.5, py: 0.5 }}>
+              ✓ Total will be exactly 100%: {pendingFund?.ticker} gets {pendingAmountNum}%,{' '}
+              {funds.find((f) => f.id === sourceFundId)?.ticker} drops to {newSourceWeight}%.
+            </Alert>
+          )}
+
+          {/* Inline Error */}
+          {errorMessage && (
+            <Alert severity="error" sx={{ mb: 1.5, py: 0.5 }}>
+              {errorMessage}
+            </Alert>
+          )}
+
+          {/* Action Buttons */}
+          <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
+            <Button size="small" color="inherit" variant="outlined" onClick={handlePopoverClose}>
+              Cancel
+            </Button>
+            <Button
+              size="small"
+              variant="contained"
+              color="primary"
+              disabled={!canConfirm}
+              onClick={handlePopoverConfirm}
+            >
+              Add {pendingFund?.ticker} at {isAmountValid ? `${pendingAmountNum}%` : '—'}
+            </Button>
+          </Box>
+        </Popover>
 
         {/* Main Recharts Wealth Trajectory Canvas */}
         <Box sx={{ height: { xs: 320, md: 380 }, width: '100%', mt: 1, mb: 2 }}>
